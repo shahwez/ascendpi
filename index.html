@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Pi-ramid Ascent: Pi Edition</title>
+    <!-- Firebase & Pi SDKs -->
+    <script src="https://gstatic.com"></script>
+    <script src="https://gstatic.com"></script>
+    <script src="https://minepi.com"></script>
+    <style>
+        body { margin: 0; background: #0a0500; color: #d4af37; font-family: 'Segoe UI', serif; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; touch-action: none; }
+        canvas { background: radial-gradient(circle at top, #1a120b 0%, #000 100%); border: 4px double #d4af37; border-radius: 10px; box-shadow: 0 0 50px rgba(212, 175, 55, 0.4); }
+        #ui { position: absolute; top: 20px; width: 380px; display: flex; justify-content: space-between; font-size: 18px; pointer-events: none; text-shadow: 2px 2px #000; z-index: 10; }
+        #overlay { position: absolute; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; text-align: center; }
+        .gold-btn { background: #d4af37; color: #000; padding: 15px 35px; font-weight: bold; border: none; border-radius: 5px; cursor: pointer; text-transform: uppercase; font-size: 16px; margin: 10px; }
+        #user-info { position: absolute; bottom: 10px; left: 10px; font-size: 12px; opacity: 0.7; }
+        #leaderboard-view { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: #000; display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 200; }
+        .row { width: 300px; display: flex; justify-content: space-between; padding: 10px; border-bottom: 1px solid #333; }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div>ALTITUDE: <span id="heightText">0</span>m</div>
+        <div>BEST: <span id="highScoreText">0</span>m</div>
+    </div>
+
+    <div id="user-info">Login with Pi to save scores</div>
+
+    <div id="overlay">
+        <h1 style="color: #d4af37; letter-spacing: 5px; margin-bottom: 5px;">PI-RAMID ASCENT</h1>
+        <p id="status-text" style="color: #fff; margin-bottom: 25px;">Connect to the Network</p>
+        <button id="main-action-btn" class="gold-btn" onclick="handleMainAction()">START ASCENT</button>
+        <button id="revive-btn" class="gold-btn" style="display:none; background:#ff4444; color:#fff;" onclick="payToRevive()">REVIVE (0.01 PI)</button>
+        <button style="background:none; border:none; color:#d4af37; margin-top:10px; cursor:pointer;" onclick="showLeaderboard()">LEADERBOARD</button>
+    </div>
+
+    <div id="leaderboard-view">
+        <h2 style="color: #d4af37;">TOP 10 PIONEERS</h2>
+        <div id="leader-list"></div>
+        <button class="gold-btn" onclick="closeLeaderboard()">CLOSE</button>
+    </div>
+
+    <audio id="bgMusic" loop preload="auto"><source src="music.mp3" type="audio/mpeg"></audio>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // --- FIREBASE & PI CONFIG ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyDeaQF-003Hu6EAK4S0hEQyBs77en-YTIU",
+            authDomain: "://firebaseapp.com",
+            projectId: "pi-ramid-ascent",
+            storageBucket: "pi-ramid-ascent.firebasestorage.app",
+            messagingSenderId: "889789419959",
+            appId: "1:889789419959:web:7ff463fca36c02032e9832"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+        const Pi = window.Pi;
+
+        let currentUser = null;
+        let isReviveAvailable = false;
+
+        async function initPi() {
+            try {
+                // Initialize Pi SDK (sandbox: true for testing)
+                Pi.init({ version: "1.5", sandbox: true });
+                const auth = await Pi.authenticate(['username', 'payments'], onIncompletePayment);
+                currentUser = auth.user;
+                document.getElementById('user-info').innerText = "Player: " + currentUser.username;
+            } catch (err) {
+                document.getElementById('user-info').innerText = "Guest Mode (Log in via Pi Browser)";
+            }
+        }
+
+        function onIncompletePayment(payment) {
+            // Handle incomplete payment logic here
+        }
+
+        async function payToRevive() {
+            if (!currentUser) { alert("Please open in Pi Browser to pay!"); return; }
+            try {
+                const payment = await Pi.createPayment({
+                    amount: 0.01,
+                    memo: "Revive in Pi-ramid Ascent",
+                    metadata: { type: "revive" }
+                }, {
+                    onReadyForServerApproval: (id) => { /* Handle server-side approval */ },
+                    onReadyForServerCompletion: (id, txid) => {
+                        // PAYMENT SUCCESS: Revive player
+                        gameOver = false;
+                        document.getElementById('overlay').style.display = 'none';
+                        player.y = cameraY + 400; // Position them safely back on a platform
+                        player.vy = -15;
+                        audio.play();
+                    },
+                    onCancel: (id) => { console.log("Payment Cancelled"); },
+                    onError: (err, id) => { alert("Payment Error!"); }
+                });
+            } catch (e) { console.error(e); }
+        }
+
+        // --- GAME ENGINE ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const audio = document.getElementById('bgMusic');
+        canvas.width = 400; canvas.height = 600;
+
+        let height = 0, highScore = localStorage.getItem('pi_top_alt') || 0, gameOver = true;
+        const player = { x: 200, y: 500, r: 13, vy: 0, vx: 0 };
+        let platforms = [], cameraY = 0, musicStarted = false;
+
+        document.getElementById('highScoreText').innerText = highScore;
+
+        function handleMainAction() {
+            if (!musicStarted) { audio.play().catch(()=>{}); musicStarted = true; }
+            document.getElementById('overlay').style.display = 'none';
+            if (gameOver) resetLevel();
+        }
+
+        function resetLevel() {
+            platforms = []; cameraY = 0; player.x = 200; player.y = 500; player.vy = 0; player.vx = 0;
+            gameOver = false; height = 0;
+            document.getElementById('heightText').innerText = "0";
+            document.getElementById('revive-btn').style.display = 'none';
+            platforms.push({ x: 0, y: 580, w: 400, h: 25 });
+            for (let i = 1; i < 10; i++) spawnPlatform(580 - i * 130);
+        }
+
+        function spawnPlatform(yPos) {
+            let w = Math.max(65, 140 - (height / 8)); 
+            platforms.push({ x: Math.random() * (400 - w), y: yPos, w: w, h: 18 });
+        }
+
+        window.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            player.vx = (mouseX - player.x) * 0.15;
+        });
+
+        function update() {
+            if (gameOver) return;
+            player.x += player.vx;
+            player.vy += 0.42; 
+            player.y += player.vy;
+
+            if (player.x < 0) player.x = 400;
+            if (player.x > 400) player.x = 0;
+
+            platforms.forEach(p => {
+                if (player.vy > 0 && player.y + player.r > p.y && player.y + player.r < p.y + p.h + 12 && player.x > p.x - 5 && player.x < p.x + p.w + 5) {
+                    player.y = p.y - player.r; player.vy = -14.5;
+                    let h = Math.floor((580 - p.y) / 10);
+                    if (h > height) {
+                        height = h;
+                        document.getElementById('heightText').innerText = height;
+                        if (height > highScore) {
+                            highScore = height;
+                            localStorage.setItem('pi_top_alt', highScore);
+                            document.getElementById('highScoreText').innerText = highScore;
+                        }
+                    }
+                }
+            });
+
+            if (player.y < cameraY + 280) cameraY = player.y - 280;
+            if (platforms[platforms.length - 1].y > cameraY - 100) spawnPlatform(platforms[platforms.length - 1].y - 135);
+            
+            if (player.y > cameraY + 680) {
+                gameOver = true;
+                audio.pause();
+                document.getElementById('overlay').style.display = 'flex';
+                document.getElementById('status-text').innerText = "ALTITUDE: " + height + "m";
+                document.getElementById('revive-btn').style.display = 'block';
+                saveScore(height);
+            }
+        }
+
+        async function saveScore(s) {
+            if (!db || s < 5) return;
+            const name = currentUser ? currentUser.username : "Guest";
+            try {
+                await db.collection("leaderboard").add({
+                    username: name, score: s, date: Date.now()
+                });
+            } catch(e) { console.log("DB sync paused"); }
+        }
+
+        async function showLeaderboard() {
+            document.getElementById('leaderboard-view').style.display = 'flex';
+            const list = document.getElementById('leader-list');
+            list.innerHTML = "Fetching scores...";
+            try {
+                const snap = await db.collection("leaderboard").orderBy("score", "desc").limit(10).get();
+                let html = ""; let i = 1;
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    html += `<div class="row"><span>#${i} ${data.username}</span><span>${data.score}m</span></div>`;
+                    i++;
+                });
+                list.innerHTML = html || "Be the first to climb!";
+            } catch(e) { list.innerHTML = "Connect to Pi Browser for rankings"; }
+        }
+
+        function closeLeaderboard() { document.getElementById('leaderboard-view').style.display = 'none'; }
+
+        function draw() {
+            ctx.clearRect(0, 0, 400, 600);
+            ctx.save(); ctx.translate(0, -cameraY);
+            platforms.forEach(p => {
+                ctx.fillStyle = '#d4af37'; ctx.fillRect(p.x, p.y, p.w, p.h);
+                ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.fillRect(p.x, p.y, p.w, 3);
+            });
+            ctx.shadowBlur = 20; ctx.shadowColor = '#fff'; ctx.fillStyle = '#fff';
+            ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+            update(); requestAnimationFrame(draw);
+        }
+
+        initPi();
+        draw();
+    </script>
+</body>
+</html>
